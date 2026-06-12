@@ -53,6 +53,12 @@ EXCLUDE_NODE_PROPS = frozenset(
         # Debug properties (Blender 4.x+)
         "debug_zone_body_lazy_function_graph",
         "debug_zone_lazy_function_graph",
+        # Dynamic item collections — handled via "_dynamic_items"
+        "capture_items",
+        "bake_items",
+        "index_switch_items",
+        # Active-item pointers of dynamic collections (UI state only)
+        "active_item",
         # Read-only computed
         "location_absolute",
         "warning_propagation",
@@ -110,6 +116,17 @@ MODE_CHANGING_PROPS = frozenset(
         "domain",
         "interpolation",
     }
+)
+
+# Dynamic item-collection properties on nodes (Capture Attribute, Bake,
+# Index Switch). The generic property loop cannot round-trip these:
+# the items define the node's socket layout, so they are serialized
+# explicitly under "_dynamic_items" and recreated at import time before
+# socket defaults and links are applied.
+DYNAMIC_ITEM_PROPS = (
+    "capture_items",
+    "bake_items",
+    "index_switch_items",
 )
 
 # Paired zone node types: bl_idname to attribute name for the paired output.

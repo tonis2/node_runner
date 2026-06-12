@@ -348,6 +348,69 @@ def deserialize_outputs(node, data, node_data, node_tree, socket_id_map):
 # Node deserializer
 
 
+# Attribute data types (as stored on dynamic items) mapped to the socket
+# type enum that ``collection.new()`` expects.
+_ITEM_SOCKET_TYPE_MAP = {
+    "FLOAT_VECTOR": "VECTOR",
+    "FLOAT2": "VECTOR",
+    "INT32_2D": "VECTOR",
+    "FLOAT_COLOR": "RGBA",
+    "BYTE_COLOR": "RGBA",
+    "QUATERNION": "ROTATION",
+    "FLOAT4X4": "MATRIX",
+    "INT8": "INT",
+}
+
+
+def deserialize_dynamic_items(node, dynamic_items):
+    """Recreate dynamic item collections (capture_items, bake_items, ...).
+
+    Must run before socket defaults and links are applied — the items
+    define the node's socket layout. ``new()`` signatures differ per
+    collection type, so several call shapes are attempted.
+    """
+    for items_prop, entries in dynamic_items.items():
+        collection = getattr(node, items_prop, None)
+        if collection is None:
+            continue
+        try:
+            collection.clear()
+        except AttributeError:
+            pass
+        for entry in entries:
+            socket_type = entry.get("socket_type") or entry.get("data_type")
+            name = entry.get("name")
+            candidates = []
+            if socket_type is not None and name is not None:
+                candidates.append((socket_type, name))
+                mapped = _ITEM_SOCKET_TYPE_MAP.get(socket_type)
+                if mapped is not None:
+                    candidates.append((mapped, name))
+            if name is not None:
+                candidates.append((name,))
+            candidates.append(())
+            item = None
+            for args in candidates:
+                try:
+                    item = collection.new(*args)
+                    break
+                except (TypeError, RuntimeError):
+                    continue
+            if item is None:
+                log.warning(
+                    "Could not recreate %s entry %r on '%s'",
+                    items_prop,
+                    name,
+                    node.name,
+                )
+                continue
+            for key, value in entry.items():
+                try:
+                    setattr(item, key, value)
+                except (AttributeError, TypeError, ValueError):
+                    pass
+
+
 def deserialize_node(node_data, node_tree, socket_id_map, defer_io=False):
     """Create a new node and apply all serialized properties.
 
@@ -368,6 +431,11 @@ def deserialize_node(node_data, node_tree, socket_id_map, defer_io=False):
 
     new_node = node_tree.nodes.new(type=node_type)
     new_node.label = node_data.get("label", "")
+
+    # Recreate dynamic item collections first — they define the node's
+    # socket layout, which everything below depends on.
+    if "_dynamic_items" in node_data:
+        deserialize_dynamic_items(new_node, node_data["_dynamic_items"])
 
     # Node tree must be created before inputs/outputs
     if "node_tree" in node_data:
@@ -428,6 +496,8 @@ def deserialize_node(node_data, node_tree, socket_id_map, defer_io=False):
         elif prop_name in ("parent", "_paired_output"):
             # Handled at the node-tree level
             pass
+        elif prop_name == "_dynamic_items":
+            pass  # Already applied right after node creation
         elif prop_name in ("label", "type", "name"):
             continue
         else:

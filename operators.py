@@ -426,23 +426,25 @@ def _apply_import(
 
     # When we auto-created a Geometry Nodes modifier, its per-instance
     # input values were initialized before the imported tree's interface
-    # sockets existed. Rebinding pushes the freshly deserialized
-    # interface defaults into the modifier so a fresh import renders the
-    # same result the source tree did, without the user having to type
-    # in every value by hand. Then overlay any modifier_values captured
-    # from the source binding so the exact look (Leaf Density = 8 etc.)
-    # is reproduced — those override the interface defaults.
+    # sockets existed, so they're all at the seed defaults. Re-create the
+    # modifier so it re-initializes from the freshly deserialized
+    # interface defaults — a fresh import then renders the same result the
+    # source tree did, without the user typing every value by hand. Then
+    # overlay any modifier_values captured from the source binding so the
+    # exact look (Leaf Density = 8 etc.) is reproduced.
+    #
+    # NOTE: this used to just rebind (``mod.node_group = None; = ng``), but
+    # Blender 5.2 doesn't refresh an existing modifier's stored inputs that
+    # way (nor when the interface defaults change) — only a freshly added
+    # modifier picks up the current defaults. Re-adding is harmless on 4.x.
     if auto_created and edit_tree.bl_idname == "GeometryNodeTree":
         obj = getattr(context, "active_object", None)
         if obj is not None:
-            for mod in obj.modifiers:
-                if mod.type == "NODES" and mod.node_group is edit_tree:
-                    mod.node_group = None
-                    mod.node_group = edit_tree
-                    _apply_modifier_values(
-                        mod, data.get("modifier_values"), socket_id_map
-                    )
-                    break
+            mod = _reinit_gn_modifier(obj, edit_tree)
+            if mod is not None:
+                _apply_modifier_values(
+                    mod, data.get("modifier_values"), socket_id_map
+                )
 
     node_count = len(new_nodes)
     operator.report(
@@ -456,7 +458,7 @@ def _apply_import(
 
 def _format_extension(fmt):
     """Return the conventional file extension (with dot) for *fmt*."""
-    if fmt == FORMAT_JSON or fmt == FORMAT_AI_JSON:
+    if fmt in (FORMAT_JSON, FORMAT_AI_JSON):
         return ".json"
     if fmt == FORMAT_XML:
         return ".xml"
@@ -483,6 +485,30 @@ def _find_modifier_for_tree(context, edit_tree):
             if mod.type == "NODES" and mod.node_group is edit_tree:
                 return mod
     return None
+
+
+def _reinit_gn_modifier(obj, node_group):
+    """Re-create *obj*'s NODES modifier bound to *node_group*.
+
+    Returns the fresh modifier (or ``None`` if no matching modifier was
+    found). A newly added modifier initializes all of its inputs from the
+    node group's current interface defaults, which is the only reliable
+    way to push those defaults into the binding on Blender 5.2. The
+    auto-created modifier is the most recent one, so re-adding keeps it in
+    the same (last) slot.
+    """
+    old = None
+    for mod in obj.modifiers:
+        if mod.type == "NODES" and mod.node_group is node_group:
+            old = mod
+            break
+    if old is None:
+        return None
+    name = old.name
+    obj.modifiers.remove(old)
+    new_mod = obj.modifiers.new(name=name, type="NODES")
+    new_mod.node_group = node_group
+    return new_mod
 
 
 def _serialize_modifier_value(value):

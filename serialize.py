@@ -11,7 +11,12 @@ import pickle
 import bpy
 import mathutils
 
-from .constants import EXCLUDE_NODE_PROPS, SERIALIZE_READONLY_PROPS, PAIRED_NODE_TYPES
+from .constants import (
+    DYNAMIC_ITEM_PROPS,
+    EXCLUDE_NODE_PROPS,
+    PAIRED_NODE_TYPES,
+    SERIALIZE_READONLY_PROPS,
+)
 
 log = logging.getLogger(__name__)
 
@@ -204,6 +209,39 @@ def serialize_attr(node, attr):
 # Node serialization
 
 
+def _serialize_dynamic_item(item):
+    """Serialize one entry of a dynamic node item collection.
+
+    Captures the writable simple properties (plus ``name``) of e.g. a
+    CaptureAttributeItem or NodeGeometryBakeItem — enough to recreate
+    the item with ``collection.new()`` and ``setattr`` on import.
+    """
+    entry = {}
+    for prop in item.bl_rna.properties:
+        if prop.identifier == "rna_type":
+            continue
+        if prop.is_readonly and prop.identifier != "name":
+            continue
+        value = getattr(item, prop.identifier)
+        if isinstance(value, (str, int, float, bool)):
+            entry[prop.identifier] = value
+    return entry
+
+
+def _socket_entry(node, s, iface_by_id):
+    """Build a socket dict for group input/output ordering, with default if available."""
+    entry = {"type": s.bl_idname, "name": s.name, "identifier": s.identifier}
+    iface = iface_by_id.get(s.identifier)
+    if iface is not None and hasattr(iface, "default_value"):
+        dv = iface.default_value
+        if dv is not None and not isinstance(dv, bpy.types.ID):
+            try:
+                entry["default"] = serialize_attr(node, dv)
+            except (TypeError, ValueError):
+                pass
+    return entry
+
+
 def serialize_node(node):
     """Serialize all properties of a single node into a dict.
 
@@ -243,34 +281,15 @@ def serialize_node(node):
                     if getattr(item, "item_type", None) == "SOCKET":
                         iface_by_id[item.identifier] = item
 
-            def _socket_entry(s):
-                entry = {
-                    "type": s.bl_idname,
-                    "name": s.name,
-                    "identifier": s.identifier,
-                }
-                iface = iface_by_id.get(s.identifier)
-                if iface is not None and hasattr(iface, "default_value"):
-                    dv = iface.default_value
-                    # Skip data-block references (collections, objects,
-                    # materials, images) — they don't survive round-trip
-                    # across files and would deserialize to None anyway.
-                    if dv is not None and not isinstance(dv, bpy.types.ID):
-                        try:
-                            entry["default"] = serialize_attr(node, dv)
-                        except (TypeError, ValueError):
-                            pass
-                return entry
-
             if prop_name == "inputs":
                 node_dict["input_order"] = [
-                    _socket_entry(s)
+                    _socket_entry(node, s, iface_by_id)
                     for s in node.inputs
                     if s.bl_idname != "NodeSocketVirtual"
                 ]
             if prop_name == "outputs":
                 node_dict["output_order"] = [
-                    _socket_entry(s)
+                    _socket_entry(node, s, iface_by_id)
                     for s in node.outputs
                     if s.bl_idname != "NodeSocketVirtual"
                 ]
@@ -283,6 +302,16 @@ def serialize_node(node):
 
     # Store absolute location for correct nested-frame positioning
     node_dict["location_absolute"] = list(node.location_absolute)
+
+    # Dynamic item collections (Capture Attribute, Bake, Index Switch):
+    # these define the node's socket layout and cannot be restored by the
+    # generic property loop, so store them explicitly.
+    for items_prop in DYNAMIC_ITEM_PROPS:
+        items = getattr(node, items_prop, None)
+        if items is not None:
+            node_dict.setdefault("_dynamic_items", {})[items_prop] = [
+                _serialize_dynamic_item(item) for item in items
+            ]
 
     # Store paired output reference for zone nodes (repeat, simulation, etc.)
     if node.bl_idname in PAIRED_NODE_TYPES:
