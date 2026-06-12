@@ -509,13 +509,51 @@ def _collect_modifier_values(mod):
 
     Skips the ``_use_attribute`` / ``_attribute_name`` companion keys —
     those are toggle metadata, not the user-facing values.
+
+    Blender 4.x exposed a GN modifier's inputs as IDProperties
+    (``mod["Socket_3"]``). Blender 5.2 dropped that — ``mod.keys()`` and
+    item access raise ``TypeError`` — so we fall back to the node group's
+    interface socket defaults, which are the live input values there.
     """
+    try:
+        keys = list(mod.keys())
+    except TypeError:
+        return _collect_interface_values(mod.node_group)
     out = {}
-    for key in mod.keys():
+    for key in keys:
         if key.endswith("_use_attribute") or key.endswith("_attribute_name"):
             continue
         out[key] = _serialize_modifier_value(mod[key])
     return out
+
+
+def _interface_input_sockets(node_group):
+    """Yield the INPUT interface sockets of *node_group* (5.2-safe)."""
+    if node_group is None:
+        return
+    items = getattr(getattr(node_group, "interface", None), "items_tree", None)
+    if not items:
+        return
+    for item in items:
+        if getattr(item, "item_type", None) != "SOCKET":
+            continue
+        if getattr(item, "in_out", None) != "INPUT":
+            continue
+        if not hasattr(item, "default_value"):
+            continue
+        yield item
+
+
+def _collect_interface_values(node_group):
+    """Capture INPUT interface socket defaults keyed by identifier.
+
+    Used on Blender 5.2+, where GN modifier inputs are no longer
+    IDProperties and the interface default *is* the input value.
+    """
+    return {
+        item.identifier: _serialize_modifier_value(item.default_value)
+        for item in _interface_input_sockets(node_group)
+    }
 
 
 def _apply_modifier_values(mod, values, socket_id_map):
@@ -529,6 +567,7 @@ def _apply_modifier_values(mod, values, socket_id_map):
     """
     if not values:
         return
+    node_group = getattr(mod, "node_group", None)
     for old_id, raw_value in values.items():
         new_id = socket_id_map.get(old_id, old_id)
         try:
@@ -541,7 +580,27 @@ def _apply_modifier_values(mod, values, socket_id_map):
         try:
             mod[new_id] = value
         except (TypeError, KeyError, AttributeError):
-            log.debug("Could not set modifier value '%s'", new_id)
+            # Blender 5.2+: GN modifier inputs aren't IDProperties, so the
+            # item assignment above isn't available. Write the value onto
+            # the interface socket default instead — that's the live input.
+            if not _set_interface_default(node_group, new_id, value):
+                log.debug("Could not set modifier value '%s'", new_id)
+
+
+def _set_interface_default(node_group, identifier, value):
+    """Set an interface socket's default by identifier (Blender 5.2+).
+
+    Returns ``True`` if a matching socket was found and assigned.
+    """
+    for item in _interface_input_sockets(node_group):
+        if item.identifier != identifier:
+            continue
+        try:
+            item.default_value = value
+        except (TypeError, ValueError):
+            log.debug("Could not set interface default '%s'", identifier)
+        return True
+    return False
 
 
 def _resolve_id_value(payload):
